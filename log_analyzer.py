@@ -1,36 +1,72 @@
 from datetime import datetime
 
-failed_attempts = {}
-unusual_logins = []
+# Settings: change these to tune what gets flagged.
+LOG_FILE = "sample_auth.log"
+NORMAL_START_HOUR = 6          # logins before 6am are unusual
+NORMAL_END_HOUR = 22           # logins from 10pm onwards are unusual
+FAILED_THRESHOLD = 3           # this many failed logins from one IP is flagged
+PRIVILEGED_ACCOUNTS = ("root", "admin")
 
-# define "business hours" as 6am to 10pm - outside this is flagged
-NORMAL_START_HOUR = 6
-NORMAL_END_HOUR = 22
 
-with open("sample_auth.log", "r") as file:
-    for line in file:
-        line = line.strip()
+def get_ip(line):
+    # The IP address sits between "from " and " port".
+    return line.split("from ")[1].split(" port")[0]
 
-        # --- track failed login attempts per IP ---
+
+def get_user(line):
+    # The username sits between " for " and " from".
+    return line.split(" for ")[1].split(" from")[0]
+
+
+def get_time(line):
+    # The timestamp is the first part of the line, before " sshd".
+    return datetime.strptime(line.split(" sshd")[0], "%Y-%m-%d %H:%M:%S")
+
+
+def detect(lines):
+    # Detection only: read the lines and collect what looks suspicious.
+    failed_by_ip = {}
+    failed_privileged = {}
+    unusual_logins = []
+
+    for line in lines:
         if "Failed password" in line:
-            parts = line.split("from ")
-            ip = parts[1].split(" port")[0]
-            failed_attempts[ip] = failed_attempts.get(ip, 0) + 1
+            ip = get_ip(line)
+            failed_by_ip[ip] = failed_by_ip.get(ip, 0) + 1
 
-        # --- check for successful logins at unusual hours ---
+            user = get_user(line)
+            if user in PRIVILEGED_ACCOUNTS:
+                failed_privileged[user] = failed_privileged.get(user, 0) + 1
+
         if "Accepted password" in line:
-            # extract the timestamp - it's the first part of the line
-            timestamp_str = line.split(" sshd")[0]
-            login_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            hour = get_time(line).hour
+            if hour < NORMAL_START_HOUR or hour >= NORMAL_END_HOUR:
+                unusual_logins.append((line, hour))
 
-            if login_time.hour < NORMAL_START_HOUR or login_time.hour >= NORMAL_END_HOUR:
-                unusual_logins.append((line, login_time.hour))
+    return failed_by_ip, failed_privileged, unusual_logins
 
-print("=== Suspicious IPs (3+ failed logins) ===")
-for ip, count in failed_attempts.items():
-    if count >= 3:
-        print(f"ALERT: {ip} had {count} failed login attempts")
 
-print("\n=== Successful Logins at Unusual Hours ===")
-for line, hour in unusual_logins:
-    print(f"ALERT: Login at {hour}:00 - {line}")
+def report(failed_by_ip, failed_privileged, unusual_logins):
+    # Reporting only: print the findings. Detection rules are not touched here.
+    print("=== Suspicious IPs (%d+ failed logins) ===" % FAILED_THRESHOLD)
+    for ip, count in failed_by_ip.items():
+        if count >= FAILED_THRESHOLD:
+            print(f"ALERT: {ip} had {count} failed login attempts")
+
+    print("\n=== Failed Logins on Privileged Accounts ===")
+    for user, count in failed_privileged.items():
+        print(f"ALERT: {count} failed login attempts on the {user} account")
+
+    print("\n=== Successful Logins at Unusual Hours ===")
+    for line, hour in unusual_logins:
+        print(f"ALERT: Login at {hour}:00 - {line}")
+
+
+def main():
+    with open(LOG_FILE, "r") as file:
+        lines = [line.strip() for line in file]
+    failed_by_ip, failed_privileged, unusual_logins = detect(lines)
+    report(failed_by_ip, failed_privileged, unusual_logins)
+
+
+main()
